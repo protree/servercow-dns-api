@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/bin/bash
 
 ##########
 # Custom servercow.de DNS API v1 for use with [acme.sh](https://github.com/Neilpang/acme.sh)
@@ -49,7 +49,45 @@ dns_servercow_add() {
   _debug _sub_domain "$_sub_domain"
   _debug _domain "$_domain"
 
-  if _servercow_api POST "$_domain" "{\"type\":\"TXT\",\"name\":\"$fulldomain\",\"content\":\"$txtvalue\",\"ttl\":20}"; then
+  # Validating wildcard domains requires multiple acme-challanges as TXT records with the same name. Servercow's Domain API v1 replaces a TXT entry if another TXT entry with the same name is sent. To set multiple TXT records with the same name Servercow's Domain API v1 needs all of them in one request. To accomplish this a simple Key=Value Cache is needed, so that consecutive requests include acme-Challanges of previous requests.
+  
+  cacheFile="/tmp/acme_dns_servercow_tmp"
+  txtvalueList=()
+  jsonContentArray=""
+  jsonData=""
+  
+  # Create cache and write to cache
+  if [[ ! -f "$cacheFile" ]]; then
+    _info "Servercow's Domain API v1 requires all acme-challanges to be sent in one request, if multiple acme-challanges with the same name are needed (e.g. if requesting a wildcard certificate). To accomplish this a local cache file \"$cacheFile\" that stores acme-challanges temporarily until validation is done is needed and will be created."
+  fi
+  
+  echo "$fulldomain=$txtvalue" >> "$cacheFile"
+
+  # Read all txtvalues from cache matching fulldomain (including current one)
+  while IFS= read -r line; do
+    IFS='=' read -r -a lineElements <<< "$line"
+    lineKey="${lineElements[0]}"
+    lineTxtvalue="${lineElements[1]}"
+    if [[ "$fulldomain" == "$lineKey" ]]; then
+      txtvalueList+=("$lineTxtvalue")
+    fi
+  done < "$cacheFile"
+  
+  _debug "acme-challanges (inkluding previous): ${txtvalueList[*]}"
+  
+  # Create json Data for request
+  jsonContentArray="["
+  for item in "${txtvalueList[@]}"; do
+    jsonContentArray="${jsonContentArray}\"$item\","
+  done
+  jsonContentArray="${jsonContentArray%,}"
+  jsonContentArray="${jsonContentArray}]"
+  jsonData="{\"type\":\"TXT\",\"name\":\"$fulldomain\",\"content\":$jsonContentArray,\"ttl\":20}"
+  
+  _debug jsonContentArray "$jsonContentArray"
+  _debug jsonData "$jsonData"
+
+  if _servercow_api POST "$_domain" "$jsonData"; then
     if printf -- "%s" "$response" | grep "ok" >/dev/null; then
       _info "Added, OK"
       return 0
@@ -68,10 +106,18 @@ dns_servercow_add() {
 dns_servercow_rm() {
   fulldomain=$1
   txtvalue=$2
+  
+  cacheFile="/tmp/acme_dns_servercow_tmp"
 
   _info "Using servercow"
   _debug fulldomain "$fulldomain"
   _debug txtvalue "$fulldomain"
+  
+  # Delete local cache
+  if [[ -f "$cacheFile" ]]; then
+    rm -f "$cacheFile"
+    _info "local cache file \"$cacheFile\" deleted"
+  fi
 
   SERVERCOW_API_Username="${SERVERCOW_API_Username:-$(_readaccountconf_mutable SERVERCOW_API_Username)}"
   SERVERCOW_API_Password="${SERVERCOW_API_Password:-$(_readaccountconf_mutable SERVERCOW_API_Password)}"
